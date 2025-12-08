@@ -42,7 +42,7 @@ const int PIN_BTN_PED_REQUEST = 14;   // Pedestrian request
 
 const int YELLOW_TIME_SEC   = 3;
 const int PED_TIME_SEC      = 8;
-const int MAX_TRAFFIC_COUNT = 10;
+const int MAX_TRAFFIC_COUNT = 20;
 
 const int BASE_GREEN_SEC    = 10;     // standard base green time
 
