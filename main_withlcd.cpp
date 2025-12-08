@@ -1,26 +1,27 @@
 /****************************************************
- * SIMPLE SMART TRAFFIC LIGHT USING ESP32
- * WITH 16x2 I2C LCD DISPLAY (NO SERIAL MONITOR)
- * - 2 directions: NS and EW
- * - Traffic count via buttons
- * - Pedestrian phase via button
+ * SMART TRAFFIC LIGHT USING ESP32 + LCD
+ * - Vehicle counts taken ONLY when road is RED
+ * - During GREEN:
+ *      Show "NSG/EWG base+extra" on line 1
+ *      Show live countdown + other road's count on line 2
+ * - Pedestrian request: next inter-road phase is pedestrian,
+ *   then only the opposite road's green comes.
  ****************************************************/
 
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
 
-// Adjust these if your LCD address is different
-// Common I2C addresses: 0x27 or 0x3F
-LiquidCrystal_I2C lcd(0x27, 16, 2);
+// -------- LCD CONFIG (I2C on GPIO32=SDA, GPIO33=SCL) --------
+LiquidCrystal_I2C lcd(0x27, 16, 2);   // Change address to 0x3F if needed
 
 // ============= PIN DEFINITIONS =============
 
-// LED pins for North-South direction
+// North–South LEDs
 const int PIN_NS_RED    = 2;
 const int PIN_NS_YELLOW = 4;
 const int PIN_NS_GREEN  = 5;
 
-// LED pins for East-West direction
+// East–West LEDs
 const int PIN_EW_RED    = 18;
 const int PIN_EW_YELLOW = 19;
 const int PIN_EW_GREEN  = 21;
@@ -29,63 +30,79 @@ const int PIN_EW_GREEN  = 21;
 const int PIN_PED_RED   = 22;
 const int PIN_PED_GREEN = 23;
 
-// Buttons (active LOW, with INPUT_PULLUP)
-const int PIN_BTN_NS_TRAFFIC  = 12; // Increase NS traffic count
-const int PIN_BTN_EW_TRAFFIC  = 13; // Increase EW traffic count
-const int PIN_BTN_PED_REQUEST = 14; // Request pedestrian crossing
+// Push buttons
+const int PIN_BTN_NS_TRAFFIC  = 12;   // NS vehicle count (when NS red)
+const int PIN_BTN_EW_TRAFFIC  = 13;   // EW vehicle count (when EW red)
+const int PIN_BTN_PED_REQUEST = 14;   // Pedestrian request
 
 // ============= CONSTANTS =============
 
-const int YELLOW_TIME_SEC   = 3;   // 3 seconds yellow
-const int PED_TIME_SEC      = 8;   // 8 seconds pedestrian green
-const int MAX_TRAFFIC_COUNT = 10;  // Max count per direction
+const int YELLOW_TIME_SEC   = 3;
+const int PED_TIME_SEC      = 8;
+const int MAX_TRAFFIC_COUNT = 10;
+
+// Base green time for adaptive formula
+const int BASE_GREEN_SEC    = 10;     // standard 10s
+// Extra time will be BASE + 0 / +10 / +20 depending on traffic
+
+// ============= PHASE ENUM =============
+
+enum Phase {
+  PHASE_NS_GREEN,
+  PHASE_NS_YELLOW,
+  PHASE_EW_GREEN,
+  PHASE_EW_YELLOW,
+  PHASE_PED_GREEN
+};
+
+Phase currentPhase = PHASE_NS_GREEN;
 
 // ============= GLOBAL VARIABLES =============
 
-// Manual traffic counts
-int trafficCountNS = 0;
-int trafficCountEW = 0;
+int trafficCountNS = 0;   // vehicles waiting on NS (when NS red)
+int trafficCountEW = 0;   // vehicles waiting on EW (when EW red)
 
-// Pedestrian request flag
-bool pedRequest = false;
+bool pedRequest = false;  // latched pedestrian request
 
-// For simple edge detection & debounce using delay()
 bool lastNsBtnState  = HIGH;
 bool lastEwBtnState  = HIGH;
 bool lastPedBtnState = HIGH;
 
 // ============= FUNCTION DECLARATIONS =============
 
-void readButtons();                    // handle button presses
-void phaseNsGreen();                   // NS green phase
-void phaseNsYellow();                  // NS yellow phase
-void phaseEwGreen();                   // EW green phase
-void phaseEwYellow();                  // EW yellow phase
-void phasePedestrianIfRequested();     // Pedestrian phase (only if requested)
+void readButtons();
+void phaseNsGreen();
+void phaseNsYellow();
+void phaseEwGreen();
+void phaseEwYellow();
+void phasePedestrianIfRequested();
 
-void setAllVehicleRed();               // helper: all vehicle signals red
-void setNsGreenState();                // helper: NS green, EW red
-void setNsYellowState();               // helper: NS yellow, EW red
-void setEwGreenState();                // helper: EW green, NS red
-void setEwYellowState();               // helper: EW yellow, NS red
-void setPedestrianGreenState();        // helper: pedestrians green
+void setAllVehicleRed();
+void setNsGreenState();
+void setNsYellowState();
+void setEwGreenState();
+void setEwYellowState();
+void setPedestrianGreenState();
 
-int computeNsGreenSeconds();           // compute NS green from traffic count
-int computeEwGreenSeconds();           // compute EW green from traffic count
+bool isNsRed();
+bool isEwRed();
 
-void lcdShowTwoLines(const char* line1, const char* line2); // helper to print on LCD
+int  computeNsGreenSeconds();
+int  computeEwGreenSeconds();
+
+void lcdShowTwoLines(const char* line1, const char* line2);
 
 // ============= SETUP =============
 
 void setup() {
-  // ✅ I2C PINS REASSIGNED HERE
-  Wire.begin(32, 33);     // SDA = GPIO32, SCL = GPIO33
-  // Initialize LCD
-  lcd.init();          // Initialize LCD
-  lcd.backlight();     // Turn on backlight
-  lcdShowTwoLines("Traffic System", "Starting...");
+  // Use GPIO32 as SDA and GPIO33 as SCL for I2C
+  Wire.begin(32, 33);
 
-  // LED pins
+  lcd.init();
+  lcd.backlight();
+  lcdShowTwoLines("Traffic System", "Starting...");
+  delay(1000);
+
   pinMode(PIN_NS_RED, OUTPUT);
   pinMode(PIN_NS_YELLOW, OUTPUT);
   pinMode(PIN_NS_GREEN, OUTPUT);
@@ -97,171 +114,247 @@ void setup() {
   pinMode(PIN_PED_RED, OUTPUT);
   pinMode(PIN_PED_GREEN, OUTPUT);
 
-  // Button pins with pull-ups
   pinMode(PIN_BTN_NS_TRAFFIC, INPUT_PULLUP);
   pinMode(PIN_BTN_EW_TRAFFIC, INPUT_PULLUP);
   pinMode(PIN_BTN_PED_REQUEST, INPUT_PULLUP);
 
-  // Initial safe state
   setAllVehicleRed();
   digitalWrite(PIN_PED_RED, HIGH);
   digitalWrite(PIN_PED_GREEN, LOW);
 
-  lcdShowTwoLines("Traffic System", "Ready.");
-  delay(1500);
+  lcdShowTwoLines("Traffic System", "Ready");
+  delay(1000);
 }
 
 // ============= MAIN LOOP =============
 
 void loop() {
-  // Run one full traffic cycle repeatedly
+  // Full cycle: NS -> (Ped?) -> EW -> (Ped?) -> repeat
 
-  phaseNsGreen();               // 1) NS green, EW red (adaptive time)
-  phaseNsYellow();              // 2) NS yellow
-  phasePedestrianIfRequested(); // optional 3) pedestrian crossing
+  phaseNsGreen();
+  phaseNsYellow();
+  phasePedestrianIfRequested();   // if pedRequest, MUST go now before EW green
 
-  phaseEwGreen();               // 4) EW green, NS red (adaptive time)
-  phaseEwYellow();              // 5) EW yellow
-  phasePedestrianIfRequested(); // optional 6) pedestrian crossing
+  phaseEwGreen();
+  phaseEwYellow();
+  phasePedestrianIfRequested();   // if pedRequest, MUST go now before NS green
 }
 
 // ============= BUTTON HANDLING =============
 
 void readButtons() {
-  // Very simple "edge detection" of button press + small delay-based debounce
-
-  // --- NS traffic button ---
-  bool currentNs = digitalRead(PIN_BTN_NS_TRAFFIC);
-  if (currentNs == LOW && lastNsBtnState == HIGH) {   // just pressed
-    if (trafficCountNS < MAX_TRAFFIC_COUNT) {
+  // NS vehicle count button
+  bool nsBtn = digitalRead(PIN_BTN_NS_TRAFFIC);
+  if (nsBtn == LOW && lastNsBtnState == HIGH) {  // just pressed
+    if (isNsRed() && trafficCountNS < MAX_TRAFFIC_COUNT) {
       trafficCountNS++;
-    }
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print("NS traffic cnt");
-    lcd.setCursor(0, 1);
-    lcd.print("NS = ");
-    lcd.print(trafficCountNS);
-    delay(400);  // small pause to read
-  }
-  lastNsBtnState = currentNs;
 
-  // --- EW traffic button ---
-  bool currentEw = digitalRead(PIN_BTN_EW_TRAFFIC);
-  if (currentEw == LOW && lastEwBtnState == HIGH) {   // just pressed
-    if (trafficCountEW < MAX_TRAFFIC_COUNT) {
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("NS RED: Count");
+      lcd.setCursor(0, 1);
+      lcd.print("NS=");
+      lcd.print(trafficCountNS);
+    } else {
+      lcdShowTwoLines("NS not RED", "No count");
+    }
+    delay(250);
+  }
+  lastNsBtnState = nsBtn;
+
+  // EW vehicle count button
+  bool ewBtn = digitalRead(PIN_BTN_EW_TRAFFIC);
+  if (ewBtn == LOW && lastEwBtnState == HIGH) {  // just pressed
+    if (isEwRed() && trafficCountEW < MAX_TRAFFIC_COUNT) {
       trafficCountEW++;
-    }
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print("EW traffic cnt");
-    lcd.setCursor(0, 1);
-    lcd.print("EW = ");
-    lcd.print(trafficCountEW);
-    delay(400);
-  }
-  lastEwBtnState = currentEw;
 
-  // --- Pedestrian request button ---
-  bool currentPed = digitalRead(PIN_BTN_PED_REQUEST);
-  if (currentPed == LOW && lastPedBtnState == HIGH) { // just pressed
-    pedRequest = true;                                // set request flag
-    lcdShowTwoLines("Pedestrian Req", "Stored.");
-    delay(400);
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("EW RED: Count");
+      lcd.setCursor(0, 1);
+      lcd.print("EW=");
+      lcd.print(trafficCountEW);
+    } else {
+      lcdShowTwoLines("EW not RED", "No count");
+    }
+    delay(250);
   }
-  lastPedBtnState = currentPed;
+  lastEwBtnState = ewBtn;
+
+  // Pedestrian request button
+  bool pedBtn = digitalRead(PIN_BTN_PED_REQUEST);
+  if (pedBtn == LOW && lastPedBtnState == HIGH) {  // just pressed
+    pedRequest = true;  // latched: will be served at next inter-road transition
+    lcdShowTwoLines("Pedestrian Req", "Stored");
+    delay(250);
+  }
+  lastPedBtnState = pedBtn;
 }
 
 // ============= PHASE FUNCTIONS =============
 
 void phaseNsGreen() {
-  int greenSeconds = computeNsGreenSeconds();   // green time based on NS traffic
+  currentPhase = PHASE_NS_GREEN;
 
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print("NS GREEN");
-  lcd.setCursor(0, 1);
-  lcd.print("T=");
-  lcd.print(greenSeconds);
-  lcd.print("s  ");
+  // Total green time based on NS traffic count
+  int totalSecs = computeNsGreenSeconds();
+  int baseSecs  = BASE_GREEN_SEC;
+  int extraSecs = totalSecs - baseSecs;
+  if (extraSecs < 0) extraSecs = 0;
 
-  setNsGreenState();  // set LEDs: NS green, EW red
+  setNsGreenState();
 
-  for (int s = 0; s < greenSeconds; s++) {
-    readButtons();    // allow new inputs
-    delay(1000);      // wait 1 second
+  // Countdown loop (GREEN duration) – syncs exactly with signal
+  for (int remaining = totalSecs; remaining > 0; remaining--) {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    // Line 1 example: "NSG 10+20s"
+    lcd.print("NSG ");
+    lcd.print(baseSecs);
+    lcd.print("+");
+    lcd.print(extraSecs);
+    lcd.print("s");
+
+    // Line 2 example: "T=30 EW=4"
+    lcd.setCursor(0, 1);
+    lcd.print("T=");
+    lcd.print(remaining);
+    lcd.print(" EW=");
+    lcd.print(trafficCountEW);   // vehicles currently waiting on EW (red)
+
+    readButtons();               // can still count EW vehicles during NS green
+    delay(1000);
   }
 
-  trafficCountNS = 0; // reset after serving
+  // After NS green is served, reset its own old queue
+  trafficCountNS = 0;
 }
 
 void phaseNsYellow() {
-  lcdShowTwoLines("NS YELLOW", "T=3s");
+  currentPhase = PHASE_NS_YELLOW;
 
-  setNsYellowState(); // NS yellow, EW red
+  // Yellow phase – show NSY + EW count (no variable time)
+  for (int remaining = YELLOW_TIME_SEC; remaining > 0; remaining--) {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("NSY T=");
+    lcd.print(remaining);
+    lcd.print("s");
 
-  for (int s = 0; s < YELLOW_TIME_SEC; s++) {
+    lcd.setCursor(0, 1);
+    lcd.print("EW=");
+    lcd.print(trafficCountEW);
+
+    setNsYellowState();
     readButtons();
     delay(1000);
   }
 }
 
 void phaseEwGreen() {
-  int greenSeconds = computeEwGreenSeconds();   // green time based on EW traffic
+  currentPhase = PHASE_EW_GREEN;
 
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print("EW GREEN");
-  lcd.setCursor(0, 1);
-  lcd.print("T=");
-  lcd.print(greenSeconds);
-  lcd.print("s  ");
+  int totalSecs = computeEwGreenSeconds();
+  int baseSecs  = BASE_GREEN_SEC;
+  int extraSecs = totalSecs - baseSecs;
+  if (extraSecs < 0) extraSecs = 0;
 
-  setEwGreenState();  // EW green, NS red
+  setEwGreenState();
 
-  for (int s = 0; s < greenSeconds; s++) {
-    readButtons();
+  // Countdown loop for EW green
+  for (int remaining = totalSecs; remaining > 0; remaining--) {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    // Line 1: "EWG 10+20s"
+    lcd.print("EWG ");
+    lcd.print(baseSecs);
+    lcd.print("+");
+    lcd.print(extraSecs);
+    lcd.print("s");
+
+    // Line 2: "T=30 NS=4"
+    lcd.setCursor(0, 1);
+    lcd.print("T=");
+    lcd.print(remaining);
+    lcd.print(" NS=");
+    lcd.print(trafficCountNS);   // vehicles currently waiting on NS (red)
+
+    readButtons();               // can still count NS vehicles during EW green
     delay(1000);
   }
 
-  trafficCountEW = 0; // reset after serving
+  trafficCountEW = 0;
 }
 
 void phaseEwYellow() {
-  lcdShowTwoLines("EW YELLOW", "T=3s");
+  currentPhase = PHASE_EW_YELLOW;
 
-  setEwYellowState(); // EW yellow, NS red
+  // Yellow phase – show EWY + NS count
+  for (int remaining = YELLOW_TIME_SEC; remaining > 0; remaining--) {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("EWY T=");
+    lcd.print(remaining);
+    lcd.print("s");
 
-  for (int s = 0; s < YELLOW_TIME_SEC; s++) {
+    lcd.setCursor(0, 1);
+    lcd.print("NS=");
+    lcd.print(trafficCountNS);
+
+    setEwYellowState();
     readButtons();
     delay(1000);
   }
 }
 
 void phasePedestrianIfRequested() {
-  if (!pedRequest) {
-    return; // nothing to do
-  }
+  if (!pedRequest) return;   // No request → skip
 
-  lcdShowTwoLines("PEDESTRIAN", "GREEN WALK");
+  currentPhase = PHASE_PED_GREEN;
 
-  setPedestrianGreenState(); // vehicles red, pedestrians green
+  setPedestrianGreenState();
 
-  for (int s = 0; s < PED_TIME_SEC; s++) {
-    // Can still read buttons to update traffic counts
+  // Pedestrian green with countdown
+  for (int remaining = PED_TIME_SEC; remaining > 0; remaining--) {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("PEDESTRIAN");
+    lcd.setCursor(0, 1);
+    lcd.print("T=");
+    lcd.print(remaining);
+    lcd.print(" WALK");
+
+    // Extra presses here will request again for *next* cycle
     readButtons();
     delay(1000);
   }
 
-  // End of pedestrian phase
+  // End pedestrian phase: all roads still red, ped to red
   setAllVehicleRed();
   digitalWrite(PIN_PED_RED, HIGH);
   digitalWrite(PIN_PED_GREEN, LOW);
 
   lcdShowTwoLines("PEDESTRIAN", "STOP");
-
-  pedRequest = false;
   delay(500);
+
+  // This request is now fully served
+  pedRequest = false;
+}
+
+// ============= RED-STATUS HELPERS =============
+
+// NS is considered "red period" when NS is not green or yellow
+bool isNsRed() {
+  return (currentPhase == PHASE_EW_GREEN ||
+          currentPhase == PHASE_EW_YELLOW ||
+          currentPhase == PHASE_PED_GREEN);
+}
+
+// EW is considered "red period" when EW is not green or yellow
+bool isEwRed() {
+  return (currentPhase == PHASE_NS_GREEN ||
+          currentPhase == PHASE_NS_YELLOW ||
+          currentPhase == PHASE_PED_GREEN);
 }
 
 // ============= LED STATE HELPERS =============
@@ -278,54 +371,46 @@ void setAllVehicleRed() {
 
 void setNsGreenState() {
   setAllVehicleRed();
-  digitalWrite(PIN_NS_RED, LOW);    // NS red off
-  digitalWrite(PIN_NS_GREEN, HIGH); // NS green on
+  digitalWrite(PIN_NS_RED, LOW);
+  digitalWrite(PIN_NS_GREEN, HIGH);
 }
 
 void setNsYellowState() {
   setAllVehicleRed();
-  digitalWrite(PIN_NS_RED, LOW);     // NS red off
-  digitalWrite(PIN_NS_YELLOW, HIGH); // NS yellow on
+  digitalWrite(PIN_NS_RED, LOW);
+  digitalWrite(PIN_NS_YELLOW, HIGH);
 }
 
 void setEwGreenState() {
   setAllVehicleRed();
-  digitalWrite(PIN_EW_RED, LOW);     // EW red off
-  digitalWrite(PIN_EW_GREEN, HIGH);  // EW green on
+  digitalWrite(PIN_EW_RED, LOW);
+  digitalWrite(PIN_EW_GREEN, HIGH);
 }
 
 void setEwYellowState() {
   setAllVehicleRed();
-  digitalWrite(PIN_EW_RED, LOW);      // EW red off
-  digitalWrite(PIN_EW_YELLOW, HIGH);  // EW yellow on
+  digitalWrite(PIN_EW_RED, LOW);
+  digitalWrite(PIN_EW_YELLOW, HIGH);
 }
 
 void setPedestrianGreenState() {
-  setAllVehicleRed();                 // all vehicles red
-  digitalWrite(PIN_PED_RED, LOW);     // ped red off
-  digitalWrite(PIN_PED_GREEN, HIGH);  // ped green on
+  setAllVehicleRed();
+  digitalWrite(PIN_PED_RED, LOW);
+  digitalWrite(PIN_PED_GREEN, HIGH);
 }
 
 // ============= GREEN TIME COMPUTATION =============
 
 int computeNsGreenSeconds() {
-  if (trafficCountNS <= 3) {
-    return 10;   // light traffic
-  } else if (trafficCountNS <= 7) {
-    return 20;   // medium
-  } else {
-    return 30;   // heavy
-  }
+  if (trafficCountNS <= 3)  return BASE_GREEN_SEC;         // 10
+  if (trafficCountNS <= 7)  return BASE_GREEN_SEC + 10;    // 20
+  return BASE_GREEN_SEC + 20;                              // 30
 }
 
 int computeEwGreenSeconds() {
-  if (trafficCountEW <= 3) {
-    return 10;
-  } else if (trafficCountEW <= 7) {
-    return 20;
-  } else {
-    return 30;
-  }
+  if (trafficCountEW <= 3)  return BASE_GREEN_SEC;         // 10
+  if (trafficCountEW <= 7)  return BASE_GREEN_SEC + 10;    // 20
+  return BASE_GREEN_SEC + 20;                              // 30
 }
 
 // ============= LCD HELPER =============
