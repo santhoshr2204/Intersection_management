@@ -78,6 +78,8 @@ void lcdShowTwoLines(const char* line1, const char* line2); // helper to print o
 // ============= SETUP =============
 
 void setup() {
+  // ✅ I2C PINS REASSIGNED HERE
+  Wire.begin(32, 33);     // SDA = GPIO32, SCL = GPIO33
   // Initialize LCD
   lcd.init();          // Initialize LCD
   lcd.backlight();     // Turn on backlight
