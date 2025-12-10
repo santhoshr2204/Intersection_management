@@ -188,7 +188,7 @@ void phaseNsGreen() {
   for (int remaining = totalSecs; remaining > 0; remaining--) {
     lcd.clear();
     lcd.setCursor(0, 0);
-    lcd.print("NS G ");
+    lcd.print("NS Green ");
     lcd.print(baseSecs);
     lcd.print("+");
     lcd.print(extraSecs);
@@ -236,7 +236,7 @@ void phaseNsYellow() {
   for (int remaining = YELLOW_TIME_SEC; remaining > 0; remaining--) {
     lcd.clear();
     lcd.setCursor(0, 0);
-    lcd.print("NS Y T=");
+    lcd.print("NS Yellow T=");
     lcd.print(remaining);
     lcd.print("s");
 
@@ -269,7 +269,7 @@ void phaseEwGreen() {
     lcd.clear();
     lcd.setCursor(0, 0);
     
-    lcd.print("EW G ");
+    lcd.print("EW Green ");
     lcd.print(baseSecs);
     lcd.print("+");
     lcd.print(extraSecs);
@@ -319,7 +319,7 @@ void phaseEwYellow() {
   for (int remaining = YELLOW_TIME_SEC; remaining > 0; remaining--) {
     lcd.clear();
     lcd.setCursor(0, 0);
-    lcd.print("EW Y T=");
+    lcd.print("EW Yellow T=");
     lcd.print(remaining);
     lcd.print("s");
 
@@ -372,4 +372,3 @@ void setPedestrianGreenState() {
   digitalWrite(PIN_PED_RED, LOW);
   digitalWrite(PIN_PED_GREEN, HIGH);
 }
-
